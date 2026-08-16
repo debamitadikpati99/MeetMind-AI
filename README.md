@@ -1,5 +1,7 @@
 # 🧠 MeetMind AI
 
+# 🧠 MeetMind AI
+
 ### AI-Powered Meeting Intelligence & Action Item Generator
 
 MeetMind AI is a smart meeting assistant that transforms raw discussion notes into structured, decision-ready outputs.
