@@ -1,6 +1,8 @@
 import streamlit as st
 from pathlib import Path
 
+from backend.ai_service import analyze_meeting
+
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(
     page_title="MeetMind AI",
@@ -248,7 +250,7 @@ with st.container():
     if analyze:
         if meeting_text.strip():
             st.success("Transcript captured. Meeting intelligence is ready.")
-            analysis = build_analysis(meeting_text)
+            analysis = analyze_meeting(meeting_text)
 
             st.markdown('<div class="section-title">📊 Meeting overview</div>', unsafe_allow_html=True)
             metric_cols = st.columns(3)
