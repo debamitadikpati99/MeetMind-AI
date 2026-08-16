@@ -1,0 +1,6 @@
+streamlit
+python-dotenv
+openai
+pydantic
+azure-ai-textanalytics
+azure-core
