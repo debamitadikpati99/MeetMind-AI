@@ -1,4 +1,4 @@
-# MeetMind AI
+# 🧠 MeetMind AI
 
 # 🧠 MeetMind AI
 
