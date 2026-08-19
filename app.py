@@ -1,9 +1,12 @@
 import streamlit as st
 from pathlib import Path
-import speech_recognition as sr
-from io import BytesIO
+import tempfile
+import threading
+import wave
 
 from backend.ai_service import analyze_meeting
+from backend.speech_to_text import transcribe_audio
+from streamlit_webrtc import AudioProcessorBase, WebRtcMode, webrtc_streamer
 
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(
@@ -212,6 +215,11 @@ st.markdown(
         padding: 0.4rem;
     }
 
+    div[data-testid="stFileUploader"] button,
+    div[data-testid="stFileUploader"] button span {
+        color: #14110a !important;
+    }
+
     .stSelectbox > div > div {
         background: var(--panel) !important;
         border-radius: 10px !important;
@@ -248,6 +256,51 @@ def load_sample_transcript(name: str) -> str:
     return sample_path.read_text(encoding="utf-8") if sample_path.exists() else ""
 
 
+class AudioRecorder(AudioProcessorBase):
+    def __init__(self):
+        self._frames = []
+        self._lock = threading.Lock()
+
+    def recv(self, frame):
+        with self._lock:
+            self._frames.append(frame)
+        return frame
+
+    def get_frames(self):
+        with self._lock:
+            return list(self._frames)
+
+
+def save_recorded_audio(frames, file_path: str) -> None:
+    if not frames:
+        raise RuntimeError("No audio was captured. Please record a longer sample and try again.")
+
+    first_frame = frames[0]
+    sample_rate = first_frame.sample_rate
+    channels = first_frame.layout.nb_channels
+    audio_bytes = bytearray()
+
+    for frame in frames:
+        samples = frame.to_ndarray(format="s16")
+        audio_bytes.extend(samples.T.tobytes())
+
+    with wave.open(file_path, "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(audio_bytes)
+
+
+def transcribe_recording(frames) -> str:
+    audio_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    audio_file.close()
+    try:
+        save_recorded_audio(frames, audio_file.name)
+        return transcribe_audio(audio_file.name)
+    finally:
+        Path(audio_file.name).unlink(missing_ok=True)
+
+
 # ---------------- HERO ----------------
 st.markdown('<div class="hero">', unsafe_allow_html=True)
 st.markdown('<div class="kicker">Meeting Intelligence</div>', unsafe_allow_html=True)
@@ -277,28 +330,34 @@ with st.container():
 
     rec_col, _ = st.columns([1, 3])
     with rec_col:
-        if st.button("🎤  Record voice", use_container_width=True, help="Upload an audio recording to transcribe"):
+        if st.button("🎤  Record voice", use_container_width=True, help="Record and transcribe meeting audio"):
             st.session_state["recording_active"] = True
+            st.session_state.pop("recording_processed", None)
 
     if st.session_state.get("recording_active", False):
-        st.info("Upload an audio file below, or paste your transcript directly into the text area.")
-        audio_file = st.file_uploader(
-            "Upload audio file (.wav, .mp3, .ogg)", type=["wav", "mp3", "ogg"], key="audio_upload"
+        st.info("Click Start Recording, speak, then click Stop Recording when you are finished.")
+        recording_context = webrtc_streamer(
+            key="meeting_voice_recorder",
+            mode=WebRtcMode.SENDONLY,
+            audio_processor_factory=AudioRecorder,
+            media_stream_constraints={"audio": True, "video": False},
+            async_processing=True,
         )
-        if audio_file is not None:
+
+        if recording_context.state.playing:
+            st.caption("Microphone is recording...")
+        elif recording_context.audio_processor and not st.session_state.get("recording_processed", False):
             try:
-                st.info("Converting audio to text…")
-                recognizer = sr.Recognizer()
-                with sr.AudioFile(audio_file) as source:
-                    audio = recognizer.record(source)
-                    transcribed_text = recognizer.recognize_google(audio)
-                    st.session_state["manual_text"] = transcribed_text
-                    st.success("Audio converted to text successfully.")
-                    st.session_state["recording_active"] = False
-            except sr.UnknownValueError:
-                st.error("Could not understand the audio. Please try again with clearer audio.")
-            except sr.RequestError:
-                st.error("Error connecting to the speech recognition service. Please try again.")
+                st.session_state["recording_processed"] = True
+                with st.spinner("Converting your recording to text..."):
+                    transcribed_text = transcribe_recording(recording_context.audio_processor.get_frames())
+                st.session_state["manual_text"] = transcribed_text
+                st.session_state["analysis"] = analyze_meeting(transcribed_text)
+                st.session_state["recording_active"] = False
+                st.success("Recording transcribed and analyzed successfully.")
+            except (RuntimeError, ValueError) as error:
+                st.session_state["recording_active"] = False
+                st.error(str(error))
 
     if uploaded_file is not None:
         meeting_text = uploaded_file.read().decode("utf-8")
@@ -318,57 +377,60 @@ with st.container():
 # ---------------- ANALYSIS ----------------
 if analyze:
     if meeting_text.strip():
-        analysis = analyze_meeting(meeting_text)
-
-        st.markdown('<div class="section-title"><span class="num">02</span> Meeting overview</div>', unsafe_allow_html=True)
-        metric_cols = st.columns(3)
-        with metric_cols[0]:
-            st.markdown(
-                f'<div class="metric-card"><div class="metric-label">Words</div>'
-                f'<div class="metric-value">{analysis["word_count"]}</div></div>',
-                unsafe_allow_html=True,
-            )
-        with metric_cols[1]:
-            st.markdown(
-                f'<div class="metric-card"><div class="metric-label">Decisions</div>'
-                f'<div class="metric-value">{len(analysis["decisions"])}</div></div>',
-                unsafe_allow_html=True,
-            )
-        with metric_cols[2]:
-            st.markdown(
-                f'<div class="metric-card"><div class="metric-label">Actions</div>'
-                f'<div class="metric-value">{len(analysis["action_items"])}</div></div>',
-                unsafe_allow_html=True,
-            )
-
-        st.markdown('<div class="section-title"><span class="num">03</span> Summary</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="summary-card">{analysis["summary"]}</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="section-title"><span class="num">04</span> Key decisions</div>', unsafe_allow_html=True)
-        if analysis["decisions"]:
-            decisions_html = "".join(
-                f"<div class='info-card'>{decision}</div>" for decision in analysis["decisions"]
-            )
-            st.markdown(decisions_html, unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="info-card">No decisions were detected in this transcript.</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="section-title"><span class="num">05</span> Action items</div>', unsafe_allow_html=True)
-        if analysis["action_items"]:
-            action_df = {
-                "Task": [item[0] for item in analysis["action_items"]],
-                "Owner": [item[1] for item in analysis["action_items"]],
-                "Deadline": [item[2] for item in analysis["action_items"]],
-            }
-            st.table(action_df)
-        else:
-            st.markdown('<div class="info-card">No action items were detected in this transcript.</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="section-title"><span class="num">06</span> Key topics</div>', unsafe_allow_html=True)
-        topic_html = "".join(f"<span class='pill'>{topic}</span>" for topic in analysis["topics"])
-        st.markdown(f'<div class="panel">{topic_html}</div>', unsafe_allow_html=True)
-
-        with st.expander("Transcript preview"):
-            st.write(meeting_text)
+        st.session_state["analysis"] = analyze_meeting(meeting_text)
     else:
         st.warning("Please provide a meeting transcript before analyzing.")
+
+analysis = st.session_state.get("analysis")
+if analysis:
+
+    st.markdown('<div class="section-title"><span class="num">02</span> Meeting overview</div>', unsafe_allow_html=True)
+    metric_cols = st.columns(3)
+    with metric_cols[0]:
+        st.markdown(
+            f'<div class="metric-card"><div class="metric-label">Words</div>'
+            f'<div class="metric-value">{analysis["word_count"]}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with metric_cols[1]:
+        st.markdown(
+            f'<div class="metric-card"><div class="metric-label">Decisions</div>'
+            f'<div class="metric-value">{len(analysis["decisions"])}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with metric_cols[2]:
+        st.markdown(
+            f'<div class="metric-card"><div class="metric-label">Actions</div>'
+            f'<div class="metric-value">{len(analysis["action_items"])}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown('<div class="section-title"><span class="num">03</span> Summary</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="summary-card">{analysis["summary"]}</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-title"><span class="num">04</span> Key decisions</div>', unsafe_allow_html=True)
+    if analysis["decisions"]:
+        decisions_html = "".join(
+            f"<div class='info-card'>{decision}</div>" for decision in analysis["decisions"]
+        )
+        st.markdown(decisions_html, unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="info-card">No decisions were detected in this transcript.</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-title"><span class="num">05</span> Action items</div>', unsafe_allow_html=True)
+    if analysis["action_items"]:
+        action_df = {
+            "Task": [item[0] for item in analysis["action_items"]],
+            "Owner": [item[1] for item in analysis["action_items"]],
+            "Deadline": [item[2] for item in analysis["action_items"]],
+        }
+        st.table(action_df)
+    else:
+        st.markdown('<div class="info-card">No action items were detected in this transcript.</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-title"><span class="num">06</span> Key topics</div>', unsafe_allow_html=True)
+    topic_html = "".join(f"<span class='pill'>{topic}</span>" for topic in analysis["topics"])
+    st.markdown(f'<div class="panel">{topic_html}</div>', unsafe_allow_html=True)
+
+    with st.expander("Transcript preview"):
+        st.write(st.session_state.get("manual_text", meeting_text))
