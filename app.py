@@ -627,8 +627,7 @@ if analysis:
     topic_html = "".join(f"<span class='pill'>{topic}</span>" for topic in analysis["topics"])
     st.markdown(f'<div class="panel">{topic_html}</div>', unsafe_allow_html=True)
 
-        with st.expander("Transcript preview"):
-            st.write(meeting_text)
-    else:
-        st.warning("Please provide a meeting transcript before analyzing.")
-        
+    with st.expander("Transcript preview"):
+        st.write(meeting_text)
+else:
+    st.warning("Please provide a meeting transcript before analyzing.")
